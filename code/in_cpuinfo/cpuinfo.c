@@ -1,9 +1,7 @@
 /* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 
-/*  Fluent Bit
+/*  Etriphany
  *  ==========
- *  Copyright (C) 2019-2021 The Fluent Bit Authors
- *  Copyright (C) 2015-2018 Treasure Data Inc.
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -31,7 +29,7 @@
 
 #include <msgpack.h>
 
-#include "cpu.h"
+#include "cpuinfo.h"
 
 static inline void snapshot_key_format(int cpus, struct cpu_snapshot *snap_arr)
 {
@@ -93,7 +91,6 @@ static inline double proc_cpu_load(char* proc_path, int cpus, struct cpu_stats *
     struct cpu_snapshot *s;
     struct cpu_snapshot *snap_arr;
 
-    //f = fopen("/proc/stat", "r");
     snprintf(line, sizeof(line), "%s/stat", proc_path);
     f = fopen(line, "r");
     if (f == NULL) {
@@ -160,7 +157,7 @@ static inline double proc_cpu_load(char* proc_path, int cpus, struct cpu_stats *
 }
 
 /* Retrieve CPU stats for a given PID */
-static inline double proc_cpu_pid_load(struct flb_cpu *ctx,
+static inline double proc_cpu_pid_load(struct flb_cpuinfo *ctx,
                                        pid_t pid, struct cpu_stats *cstats)
 {
     int ret;
@@ -183,7 +180,7 @@ static inline double proc_cpu_pid_load(struct flb_cpu *ctx,
     struct cpu_snapshot *s;
 
     /* Read the process stats */
-    snprintf(line, sizeof(line) - 1, "/proc/%d/stat", pid);
+    snprintf(line, sizeof(line) - 1, "/%s/%d/stat", ctx->proc_path, pid);
     f = fopen(line, "r");
     if (f == NULL) {
         flb_errno();
@@ -240,7 +237,7 @@ static inline double proc_cpu_pid_load(struct flb_cpu *ctx,
  * it returns the active snapshot.
  */
 struct cpu_snapshot *snapshot_percent(struct cpu_stats *cstats,
-                                      struct flb_cpu *ctx)
+                                      struct flb_cpuinfo *ctx)
 {
     int i;
     unsigned long sum_pre;
@@ -315,7 +312,7 @@ struct cpu_snapshot *snapshot_percent(struct cpu_stats *cstats,
 }
 
 struct cpu_snapshot *snapshot_pid_percent(struct cpu_stats *cstats,
-                                          struct flb_cpu *ctx)
+                                          struct flb_cpuinfo *ctx)
 {
     unsigned long sum_pre;
     unsigned long sum_now;
@@ -363,7 +360,7 @@ static int cpu_collect_system(struct flb_input_instance *ins,
 {
     int i;
     int ret;
-    struct flb_cpu *ctx = in_context;
+    struct flb_cpuinfo *ctx = in_context;
     struct cpu_stats *cstats = &ctx->cstats;
     struct cpu_snapshot *s;
     msgpack_packer mp_pck;
@@ -425,7 +422,7 @@ static int cpu_collect_pid(struct flb_input_instance *ins,
                            struct flb_config *config, void *in_context)
 {
     int ret;
-    struct flb_cpu *ctx = in_context;
+    struct flb_cpuinfo *ctx = in_context;
     struct cpu_stats *cstats = &ctx->cstats;
     struct cpu_snapshot *s;
     msgpack_packer mp_pck;
@@ -476,10 +473,10 @@ static int cpu_collect_pid(struct flb_input_instance *ins,
 }
 
 /* Callback to gather CPU usage between now and previous snapshot */
-static int cb_cpu_collect(struct flb_input_instance *ins,
+static int cb_cpuinfo_collect(struct flb_input_instance *ins,
                           struct flb_config *config, void *in_context)
 {
-    struct flb_cpu *ctx = in_context;
+    struct flb_cpuinfo *ctx = in_context;
 
     /* if a PID is get, get CPU stats only for that process */
     if (ctx->pid >= 0) {
@@ -492,16 +489,16 @@ static int cb_cpu_collect(struct flb_input_instance *ins,
 }
 
 /* Init CPU input */
-static int cb_cpu_init(struct flb_input_instance *in,
+static int cb_cpuinfo_init(struct flb_input_instance *in,
                        struct flb_config *config, void *data)
 {
     int ret;
-    struct flb_cpu *ctx;
+    struct flb_cpuinfo *ctx;
     (void) data;
     const char *pval = NULL;
 
     /* Allocate space for the configuration */
-    ctx = flb_calloc(1, sizeof(struct flb_cpu));
+    ctx = flb_calloc(1, sizeof(struct flb_cpuinfo));
     if (!ctx) {
         flb_errno();
         return -1;
@@ -579,7 +576,7 @@ static int cb_cpu_init(struct flb_input_instance *in,
 
     /* Set our collector based on time, CPU usage every 1 second */
     ret = flb_input_set_collector_time(in,
-                                       cb_cpu_collect,
+                                       cb_cpuinfo_collect,
                                        ctx->interval_sec,
                                        ctx->interval_nsec,
                                        config);
@@ -592,22 +589,22 @@ static int cb_cpu_init(struct flb_input_instance *in,
     return 0;
 }
 
-static void cb_cpu_pause(void *data, struct flb_config *config)
+static void cb_cpuinfo_pause(void *data, struct flb_config *config)
 {
-    struct flb_cpu *ctx = data;
+    struct flb_cpuinfo *ctx = data;
     flb_input_collector_pause(ctx->coll_fd, ctx->ins);
 }
 
-static void cb_cpu_resume(void *data, struct flb_config *config)
+static void cb_cpuinfo_resume(void *data, struct flb_config *config)
 {
-    struct flb_cpu *ctx = data;
+    struct flb_cpuinfo *ctx = data;
     flb_input_collector_resume(ctx->coll_fd, ctx->ins);
 }
 
-static int cb_cpu_exit(void *data, struct flb_config *config)
+static int cb_cpuinfo_exit(void *data, struct flb_config *config)
 {
     (void) *config;
-    struct flb_cpu *ctx = data;
+    struct flb_cpuinfo *ctx = data;
     struct cpu_stats *cs;
 
     /* Release snapshots */
@@ -625,11 +622,11 @@ static int cb_cpu_exit(void *data, struct flb_config *config)
 struct flb_input_plugin in_cpuinfo_plugin = {
     .name         = "cpuinfo",
     .description  = "CPU Usage",
-    .cb_init      = cb_cpu_init,
+    .cb_init      = cb_cpuinfo_init,
     .cb_pre_run   = NULL,
-    .cb_collect   = cb_cpu_collect,
+    .cb_collect   = cb_cpuinfo_collect,
     .cb_flush_buf = NULL,
-    .cb_pause     = cb_cpu_pause,
-    .cb_resume    = cb_cpu_resume,
-    .cb_exit      = cb_cpu_exit
+    .cb_pause     = cb_cpuinfo_pause,
+    .cb_resume    = cb_cpuinfo_resume,
+    .cb_exit      = cb_cpuinfo_exit
 };

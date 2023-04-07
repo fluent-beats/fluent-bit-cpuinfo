@@ -1,9 +1,7 @@
 /* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 
-/*  Fluent Bit
+/*  Etriphany
  *  ==========
- *  Copyright (C) 2019-2021 The Fluent Bit Authors
- *  Copyright (C) 2015-2018 Treasure Data Inc.
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -18,8 +16,8 @@
  *  limitations under the License.
  */
 
-#ifndef FLB_IN_CPU_H
-#define FLB_IN_CPU_H
+#ifndef FLB_IN_CPUINFO_H
+#define FLB_IN_CPUINFO_H
 
 #include <fluent-bit/flb_config.h>
 #include <fluent-bit/flb_input.h>
@@ -68,7 +66,7 @@ struct cpu_stats {
 };
 
 /* CPU Input configuration & context */
-struct flb_cpu {
+struct flb_cpuinfo {
     /* setup */
     pid_t pid;          /* optional PID */
     int n_processors;   /* number of core processors  */
@@ -101,7 +99,7 @@ struct flb_cpu {
  */
 static inline double CPU_METRIC_SYS_AVERAGE(unsigned long pre,
                                             unsigned long now,
-                                            struct flb_cpu *ctx)
+                                            struct flb_cpuinfo *ctx)
 {
     double diff;
     double total = 0;
@@ -118,7 +116,7 @@ static inline double CPU_METRIC_SYS_AVERAGE(unsigned long pre,
 
 /* Returns the CPU % utilization of a given CPU core */
 static inline double CPU_METRIC_USAGE(unsigned long pre, unsigned long now,
-                                      struct flb_cpu *ctx)
+                                      struct flb_cpuinfo *ctx)
 {
     double diff;
     double total = 0;
