@@ -29,7 +29,6 @@
 #define DEFAULT_INTERVAL_SEC    1
 #define DEFAULT_INTERVAL_NSEC   0
 #define IN_CPU_KEY_LEN       16
-
 #define DEFAULT_PROC_PATH "/proc"
 
 struct cpu_key {
@@ -70,7 +69,8 @@ struct cpu_stats {
 
 /* CPU Input configuration & context */
 struct flb_cpu {
-    char*  proc_path;   /* path to /proc/stat */
+    /* setup */
+    pid_t pid;          /* optional PID */
     int n_processors;   /* number of core processors  */
     int cpu_ticks;      /* CPU ticks (Kernel setting) */
     int coll_fd;        /* collector id/fd            */
@@ -78,6 +78,7 @@ struct flb_cpu {
     int interval_nsec;  /* interval collection time (Nanosecond) */
     struct cpu_stats cstats;
     struct flb_input_instance *ins;
+    char *proc_path;
 };
 
 

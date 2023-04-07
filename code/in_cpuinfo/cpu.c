@@ -82,19 +82,20 @@ static inline void snapshots_switch(struct cpu_stats *cstats)
 }
 
 /* Retrieve CPU load from the system (through ProcFS) */
-static inline double proc_cpu_load(char*  proc_path, int cpus, struct cpu_stats *cstats)
+static inline double proc_cpu_load(char* proc_path, int cpus, struct cpu_stats *cstats)
 {
     int i;
     int ret;
-    char buf[255];
+    char line[255];
     size_t len = 0;
     char *fmt;
     FILE *f;
     struct cpu_snapshot *s;
     struct cpu_snapshot *snap_arr;
 
-    snprintf(buf, sizeof(buf), "%s/%s", proc_path, "stat");
-    f = fopen(buf, "r");
+    //f = fopen("/proc/stat", "r");
+    snprintf(line, sizeof(line), "%s/stat", proc_path);
+    f = fopen(line, "r");
     if (f == NULL) {
         flb_errno();
         return -1;
@@ -109,19 +110,19 @@ static inline double proc_cpu_load(char*  proc_path, int cpus, struct cpu_stats 
 
     /* Always read (n_cpus + 1) lines */
     for (i = 0; i <= cpus; i++) {
-        if (fgets(buf, sizeof(buf) - 1, f)) {
-            len = strlen(buf);
-            if (buf[len - 1] == '\n') {
-                buf[--len] = 0;
-                if (len && buf[len - 1] == '\r') {
-                    buf[--len] = 0;
+        if (fgets(line, sizeof(line) - 1, f)) {
+            len = strlen(line);
+            if (line[len - 1] == '\n') {
+                line[--len] = 0;
+                if (len && line[len - 1] == '\r') {
+                    line[--len] = 0;
                 }
             }
 
             s = &snap_arr[i];
             if (i == 0) {
                 fmt = " cpu  %lu %lu %lu %lu %lu";
-                ret = sscanf(buf,
+                ret = sscanf(line,
                              fmt,
                              &s->v_user,
                              &s->v_nice,
@@ -135,7 +136,7 @@ static inline double proc_cpu_load(char*  proc_path, int cpus, struct cpu_stats 
             }
             else {
                 fmt = " %s %lu %lu %lu %lu %lu";
-                ret = sscanf(buf,
+                ret = sscanf(line,
                              fmt,
                              &s->v_cpuid,
                              &s->v_user,
@@ -152,6 +153,82 @@ static inline double proc_cpu_load(char*  proc_path, int cpus, struct cpu_stats 
         else {
             break;
         }
+    }
+
+    fclose(f);
+    return 0;
+}
+
+/* Retrieve CPU stats for a given PID */
+static inline double proc_cpu_pid_load(struct flb_cpu *ctx,
+                                       pid_t pid, struct cpu_stats *cstats)
+{
+    int ret;
+    char *p;
+    char line[255];
+    char *fmt = ") %c %d %d %d %d %d %u %lu %lu %lu %lu %lu %lu ";
+    FILE *f;
+    /* sscanf variables (ss_N) to perform scanning */
+    unsigned char ss_state;
+    unsigned int ss_ppid;
+    unsigned int ss_pgrp;
+    unsigned int ss_session;
+    unsigned int ss_tty_nr;
+    unsigned int ss_tpgid;
+    unsigned int ss_flags;
+    unsigned long ss_minflt;
+    unsigned long ss_cmdinflt;
+    unsigned long ss_majflt;
+    unsigned long ss_cmajflt;
+    struct cpu_snapshot *s;
+
+    /* Read the process stats */
+    snprintf(line, sizeof(line) - 1, "/proc/%d/stat", pid);
+    f = fopen(line, "r");
+    if (f == NULL) {
+        flb_errno();
+        flb_plg_error(ctx->ins, "error opening stats file %s", line);
+        return -1;
+    }
+
+    if (cstats->snap_active == CPU_SNAP_ACTIVE_A) {
+        s = cstats->snap_a;
+    }
+    else {
+        s = cstats->snap_b;
+    }
+
+    if (fgets(line, sizeof(line) - 1, f) == NULL) {
+        flb_plg_error(ctx->ins, "cannot read process %ld stats", (long) pid);
+        fclose(f);
+        return -1;
+    }
+
+    errno = 0;
+
+    /* skip first two values (after process name) */
+    p = line;
+    while (*p != ')') p++;
+
+    errno = 0;
+    ret = sscanf(p,
+                 fmt,
+                 &ss_state,
+                 &ss_ppid,
+                 &ss_pgrp,
+                 &ss_session,
+                 &ss_tty_nr,
+                 &ss_tpgid,
+                 &ss_flags,
+                 &ss_minflt,
+                 &ss_cmdinflt,
+                 &ss_majflt,
+                 &ss_cmajflt,
+                 &s->v_user,
+                 &s->v_system);
+    if (errno != 0) {
+        flb_errno();
+        flb_plg_error(ctx->ins, "pid sscanf failed ret=%i", ret);
     }
 
     fclose(f);
@@ -237,6 +314,50 @@ struct cpu_snapshot *snapshot_percent(struct cpu_stats *cstats,
     return arr_now;
 }
 
+struct cpu_snapshot *snapshot_pid_percent(struct cpu_stats *cstats,
+                                          struct flb_cpu *ctx)
+{
+    unsigned long sum_pre;
+    unsigned long sum_now;
+    struct cpu_snapshot *snap_pre = NULL;
+    struct cpu_snapshot *snap_now = NULL;
+
+    if (cstats->snap_active == CPU_SNAP_ACTIVE_A) {
+        snap_now = cstats->snap_a;
+        snap_pre = cstats->snap_b;
+    }
+    else if (cstats->snap_active == CPU_SNAP_ACTIVE_B) {
+        snap_now = cstats->snap_b;
+        snap_pre = cstats->snap_a;
+    }
+
+    /* Calculate overall CPU usage (user space + kernel space */
+    sum_pre = (snap_pre->v_user + snap_pre->v_system);
+    sum_now = (snap_now->v_user + snap_now->v_system);
+
+    snap_now->p_cpu = CPU_METRIC_SYS_AVERAGE(sum_pre, sum_now, ctx);
+
+    /* User space CPU% */
+    snap_now->p_user = CPU_METRIC_SYS_AVERAGE(snap_pre->v_user,
+                                              snap_now->v_user,
+                                              ctx);
+
+    /* Kernel space CPU% */
+    snap_now->p_system = CPU_METRIC_SYS_AVERAGE(snap_pre->v_system,
+                                                snap_now->v_system,
+                                                ctx);
+
+#ifdef FLB_TRACE
+    flb_trace("cpu[pid=%i] all=%s%f%s user=%s%f%s system=%s%f%s",
+              ctx->pid,
+              ANSI_BOLD, snap_now->p_cpu, ANSI_RESET,
+              ANSI_BOLD, snap_now->p_user, ANSI_RESET,
+              ANSI_BOLD, snap_now->p_system, ANSI_RESET);
+#endif
+
+    return snap_now;
+}
+
 static int cpu_collect_system(struct flb_input_instance *ins,
                               struct flb_config *config, void *in_context)
 {
@@ -300,15 +421,74 @@ static int cpu_collect_system(struct flb_input_instance *ins,
     return 0;
 }
 
+static int cpu_collect_pid(struct flb_input_instance *ins,
+                           struct flb_config *config, void *in_context)
+{
+    int ret;
+    struct flb_cpu *ctx = in_context;
+    struct cpu_stats *cstats = &ctx->cstats;
+    struct cpu_snapshot *s;
+    msgpack_packer mp_pck;
+    msgpack_sbuffer mp_sbuf;
+    (void) config;
+
+    /* Get overall system CPU usage */
+    ret = proc_cpu_pid_load(ctx, ctx->pid, cstats);
+    if (ret != 0) {
+        flb_plg_error(ctx->ins, "error retrieving PID CPU stats");
+        return -1;
+    }
+
+    s = snapshot_pid_percent(cstats, ctx);
+
+    msgpack_sbuffer_init(&mp_sbuf);
+    msgpack_packer_init(&mp_pck, &mp_sbuf, msgpack_sbuffer_write);
+
+    /*
+     * Store the new data into the MessagePack buffer,
+     */
+    msgpack_pack_array(&mp_pck, 2);
+    flb_pack_time_now(&mp_pck);
+    msgpack_pack_map(&mp_pck, 3);
+
+    /* All CPU */
+    msgpack_pack_str(&mp_pck, 5);
+    msgpack_pack_str_body(&mp_pck, "cpu_p", 5);
+    msgpack_pack_double(&mp_pck, s->p_cpu);
+
+    /* User space CPU % */
+    msgpack_pack_str(&mp_pck, 6);
+    msgpack_pack_str_body(&mp_pck, "user_p", 6);
+    msgpack_pack_double(&mp_pck, s->p_user);
+
+    /* System CPU % */
+    msgpack_pack_str(&mp_pck, 8);
+    msgpack_pack_str_body(&mp_pck, "system_p", 8);
+    msgpack_pack_double(&mp_pck, s->p_system);
+
+    snapshots_switch(cstats);
+    flb_plg_trace(ctx->ins, "PID %i CPU %0.2f%%", ctx->pid, s->p_cpu);
+
+    flb_input_chunk_append_raw(ins, NULL, 0, mp_sbuf.data, mp_sbuf.size);
+    msgpack_sbuffer_destroy(&mp_sbuf);
+
+    return 0;
+}
+
 /* Callback to gather CPU usage between now and previous snapshot */
 static int cb_cpu_collect(struct flb_input_instance *ins,
                           struct flb_config *config, void *in_context)
 {
     struct flb_cpu *ctx = in_context;
 
-    /* Get all system CPU stats */
-    return cpu_collect_system(ins, config, in_context);
-
+    /* if a PID is get, get CPU stats only for that process */
+    if (ctx->pid >= 0) {
+        return cpu_collect_pid(ins, config, in_context);
+    }
+    else {
+        /* Get all system CPU stats */
+        return cpu_collect_system(ins, config, in_context);
+    }
 }
 
 /* Init CPU input */
@@ -328,7 +508,11 @@ static int cb_cpu_init(struct flb_input_instance *in,
     }
     ctx->ins = in;
 
-    /* proc/stat file setting */
+    /* Gather number of processors and CPU ticks */
+    ctx->n_processors = sysconf(_SC_NPROCESSORS_ONLN);
+    ctx->cpu_ticks    = sysconf(_SC_CLK_TCK);
+
+    /* stat file setting */
     pval = flb_input_get_property("proc_path", in);
     if (pval != NULL) {
         ctx->proc_path = flb_strdup(pval);
@@ -336,11 +520,14 @@ static int cb_cpu_init(struct flb_input_instance *in,
        ctx->proc_path = DEFAULT_PROC_PATH;
     }
 
-    // FIXME: must match host not container
-    /* Gather number of processors and CPU ticks */
-    ctx->n_processors = sysconf(_SC_NPROCESSORS_ONLN);
-    // The number of intervals per second used to express the value in type clock_t.
-    ctx->cpu_ticks = sysconf(_SC_CLK_TCK);
+    /* Process ID */
+    pval = flb_input_get_property("pid", in);
+    if (pval) {
+        ctx->pid = atoi(pval);
+    }
+    else {
+        ctx->pid = -1;
+    }
 
     /* Collection time setting */
     pval = flb_input_get_property("interval_sec", in);
@@ -373,8 +560,12 @@ static int cb_cpu_init(struct flb_input_instance *in,
     }
 
     /* Get CPU load, ready to be updated once fired the calc callback */
-    ret = proc_cpu_load(ctx->proc_path, ctx->n_processors, &ctx->cstats);
-
+    if (ctx->pid > 0) {
+        ret = proc_cpu_pid_load(ctx, ctx->pid, &ctx->cstats);
+    }
+    else {
+        ret = proc_cpu_load(ctx->proc_path, ctx->n_processors, &ctx->cstats);
+    }
     if (ret != 0) {
         flb_error("[cpu] Could not obtain CPU data");
         flb_free(ctx);
@@ -431,8 +622,8 @@ static int cb_cpu_exit(void *data, struct flb_config *config)
 }
 
 /* Plugin reference */
-struct flb_input_plugin in_host_cpu_plugin = {
-    .name         = "host_cpu",
+struct flb_input_plugin in_cpuinfo_plugin = {
+    .name         = "cpuinfo",
     .description  = "CPU Usage",
     .cb_init      = cb_cpu_init,
     .cb_pre_run   = NULL,
